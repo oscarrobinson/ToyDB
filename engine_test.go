@@ -172,12 +172,55 @@ func Test_StorageEngine_Get_returnsValueForKey(t *testing.T) {
 	storageEngine.offsetMap = make(map[[32]byte]dataInfo)
 	storageEngine.offsetMap[sha256Key] = dataInfo{3, 5}
 
-	result, _ := storageEngine.Get("randomkey")
+	result, err := storageEngine.Get("randomkey")
 
 	expectedResult := [5]byte{0x04, 0x05, 0x06, 0x07, 0x08}
 
 	if !reflect.DeepEqual(result, expectedResult[:]) {
 		t.Errorf("%d did not equal expected %d", result, expectedResult[:])
+	}
+
+	if err != nil {
+		t.Errorf("Non nil value %d for err", err)
+	}
+}
+
+func Test_StorageEngine_Get_returnsNilWhenKeyNotFound(t *testing.T) {
+	storageEngine := new(StorageEngine)
+	storageEngine.offsetMap = make(map[[32]byte]dataInfo)
+
+	result, err := storageEngine.Get("randomkey")
+
+	if result != nil {
+		t.Errorf("Non nil value %d for result", result)
+	}
+
+	if err != nil {
+		t.Errorf("Non nil value %d for err", err)
+	}
+}
+
+func Test_StorageEngine_Get_returnsErrorWhenReadFails(t *testing.T) {
+	dataFileContents := [48]byte{
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10}
+
+	sha256Key := [32]byte{
+		0x52, 0xec, 0x14, 0x80, 0x30, 0x8a, 0x78, 0xb9, 
+		0xf1, 0xc9, 0xc7, 0xd9, 0x65, 0x4d, 0x4a, 0x85, 
+		0x81, 0x9c, 0x26, 0xb3, 0x3a, 0x32, 0xf5, 0xc2, 
+		0x7d, 0x47, 0x2a, 0x46, 0x2f, 0x10, 0x2f, 0x45}
+
+	storageEngine := new(StorageEngine)
+	fakeDataFile := bytes.NewReader(dataFileContents[:])
+	storageEngine.dataFile = mockEngineReadFile{fakeDataFile}
+	storageEngine.offsetMap = make(map[[32]byte]dataInfo)
+	storageEngine.offsetMap[sha256Key] = dataInfo{3, 100}
+
+	_, err := storageEngine.Get("randomkey")
+
+	if err.Error() != "EOF" {
+		t.Errorf("Unexpected error: %s", err)
 	}
 }
 
