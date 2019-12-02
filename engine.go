@@ -22,8 +22,8 @@ type dataInfo struct {
 
 func (d dataInfo) toByteSlice() []byte {
 	buffer := make([]byte, 16)
-	binary.BigEndian.PutUnint64(buffer[0:8], uint64(dataInfo.offset))
-	binary.BigEndian.PutUnint64(buffer[8:16], uint64(dataInfo.offset))
+	binary.BigEndian.PutUint64(buffer[0:8], uint64(d.offset))
+	binary.BigEndian.PutUint64(buffer[8:16], uint64(d.length))
 	return buffer
 }
 
@@ -35,7 +35,7 @@ func parseOffsetMap(file io.ReaderAt) map[[32]byte]dataInfo {
 	var hashBuffer [recordLength]byte
 	var dataOffsetIntBytes [8]byte
 	var dataLengthIntBytes [8]byte
-	var readBytes int = recordLength
+	readBytes := recordLength
 	for readBytes == recordLength {
 		var err error
 		readBytes, err = file.ReadAt(hashBuffer[:], offset)
@@ -86,7 +86,7 @@ type EngineFile interface {
 	io.ReaderAt
 	io.Writer
 	io.Closer
-	Stat() (FileInfo, error)
+	Stat() (os.FileInfo, error)
 }
 
 type StorageEngineConfig struct {
@@ -95,15 +95,15 @@ type StorageEngineConfig struct {
 }
 
 type StorageEngine struct {
-	dataChannel      chan []dataToWrite
-	mapChannel       chan []dataToMap
-	offsetMap        map[[32]byte]dataInfo
-	mapFile          EngineFile
-	mapFileLength    int64
-	dataFile         EngineFile
-	dataFileLength   int64
-	shutdownTrigger  chan []struct{}
-	shutdownResponse chan int
+	dataChannel             chan dataToWrite
+	mapChannel              chan dataToMap
+	offsetMap               map[[32]byte]dataInfo
+	mapFile                 EngineFile
+	mapFileLength           int64
+	dataFile                EngineFile
+	dataFileLength          int64
+	shutdownTriggerChannel  chan struct{}
+	shutdownResponseChannel chan int
 }
 
 func (eng StorageEngine) Get(key string) ([]byte, error) {
@@ -118,47 +118,47 @@ func (eng StorageEngine) Get(key string) ([]byte, error) {
 }
 
 func (eng StorageEngine) Shutdown() {
-	eng.shutdownTrigger <- shutdown
+	eng.shutdownTriggerChannel <- shutdown{}
 	mapShutdown := false
 	dataShutdown := false
 	for !(mapShutdown && dataShutdown) {
-		entityShutdown <- eng.shutdownResponse
+		entityShutdown := <- eng.shutdownResponseChannel
 		if entityShutdown == dataProcessorShutDown {
 			dataShutdown = true
 		} else {
 			mapShutdown = true
 		}
 	}
-	close(eng.shutdownTrigger)
-	close(eng.shutdownResponse)
+	close(eng.shutdownTriggerChannel)
+	close(eng.shutdownResponseChannel)
 	close(eng.dataChannel)
 	close(eng.mapChannel)
 	dataCloseErr := eng.dataFile.Close()
 	if dataCloseErr != nil {
-		log.Println("Error closing data file: %s", dataCloseErr.Error())
+		log.Printf("Error closing data file: %s\n", dataCloseErr.Error())
 	}
 	mapCloseErr := eng.mapFile.Close()
 	if mapCloseErr != nil {
-		log.Println("Error closing map file: %s", mapCloseErr.Error())
+		log.Printf("Error closing map file: %s\n", mapCloseErr.Error())
 	}
 }
 
 func (eng StorageEngine) processDataChannel() {
 	for {
 		select {
-		case writeData <- eng.dataChannel:
-			bytesWritten, err := eng.dataFile.Write(writeData.value)
-			eng.dataFileLength += bytesWritten
+		case data := <- eng.dataChannel:
+			bytesWritten, err := eng.dataFile.Write(data.value)
+			eng.dataFileLength += int64(bytesWritten)
 			if err != nil {
-				log.Println("Error writing data: %s", err.Error())
-				writeData.responseChannel <- 1
+				log.Printf("Error writing data: %s\n", err.Error())
+				data.responseChannel <- 1
 			} else {
-				info := dataInfo{eng.dataFile.length, bytesWritten}
-				mapData := dataToMap{writeData.key, info, writeData.responseChannel}
+				info := dataInfo{eng.dataFileLength, int64(bytesWritten)}
+				mapData := dataToMap{data.key, info, data.responseChannel}
 				eng.mapChannel <- mapData
 			}
-		case <-eng.shutdownTrigger:
-			eng.shutdownResponse <- dataProcessorShutDown
+		case <-eng.shutdownTriggerChannel:
+			eng.shutdownResponseChannel <- dataProcessorShutDown
 			return
 		default:
 		}
@@ -168,19 +168,21 @@ func (eng StorageEngine) processDataChannel() {
 func (eng StorageEngine) processMapChannel() {
 	for {
 		select {
-		case mapData <- eng.mapChannel:
-			toWrite := append(mapData, mapData.dataInfo.toByteSlice()...)
+		case mapInfo := <- eng.mapChannel:
+			toWrite := append(mapInfo.key, mapInfo.dataInfo.toByteSlice()...)
 			bytesWritten, err := eng.dataFile.Write(toWrite)
-			eng.mapFileLength += bytesWritten
+			eng.mapFileLength += int64(bytesWritten)
 			if err != nil {
-				log.Println("Error writing map data: %s", err.Error())
-				writeData.responseChannel <- 1
+				log.Printf("Error writing map data: %s\n", err.Error())
+				mapInfo.responseChannel <- 1
 			} else {
-				eng.offsetMap[mapData] = mapData.dataInfo
-				writeData.responseChannel <- 0
+				var key [32]byte
+				copy(key[:], mapInfo.key[0:32])
+				eng.offsetMap[key] = mapInfo.dataInfo
+				mapInfo.responseChannel <- 0
 			}
-		case <-eng.shutdownTrigger:
-			eng.shutdownResponse <- mapProcessorShutDown
+		case <-eng.shutdownTriggerChannel:
+			eng.shutdownResponseChannel <- mapProcessorShutDown
 			return
 		default:
 		}
@@ -189,23 +191,23 @@ func (eng StorageEngine) processMapChannel() {
 
 func NewStorageEngine(mapFile EngineFile, dataFile EngineFile) *StorageEngine {
 	storageEngine := new(StorageEngine)
-	storageEngine.dataChannel = make(chan []dataToWrite)
-	storageEngine.mapChannel = make(chan []dataToMap)
-	storageEngine.shutdownTrigger = make(chan struct{})
-	storageEngine.shutdownResponse = make(chan int)
+	storageEngine.dataChannel = make(chan dataToWrite)
+	storageEngine.mapChannel = make(chan dataToMap)
+	storageEngine.shutdownTriggerChannel = make(chan struct{})
+	storageEngine.shutdownResponseChannel = make(chan int)
 	storageEngine.offsetMap = parseOffsetMap(mapFile)
 	storageEngine.mapFile = mapFile
-	mapFileLength, mapLengthErr = mapFile.Stat()
+	mapFileInfo, mapLengthErr := mapFile.Stat()
 	if mapLengthErr != nil {
 		log.Fatal("Failed to read map file length")
 	}
-	storageEngine.mapFileLength = mapFileLength
+	storageEngine.mapFileLength = mapFileInfo.Size()
 	storageEngine.dataFile = dataFile
-	dataFileLength, dataLengthErr = dataFile.Stat()
+	dataFileInfo, dataLengthErr := dataFile.Stat()
 	if dataLengthErr != nil {
 		log.Fatal("Failed to read data file length")
 	}
-	storageEngine.dataFileLength = dataFileLength
+	storageEngine.dataFileLength = dataFileInfo.Size()
 	go storageEngine.processDataChannel()
 	go storageEngine.processMapChannel()
 	return storageEngine

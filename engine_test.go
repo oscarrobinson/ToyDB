@@ -4,9 +4,16 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
 	"reflect"
 	"testing"
 )
+
+func shouldEqual(t *testing.T, got interface{}, expected interface{}) {
+	if !reflect.DeepEqual(got, expected) {
+		t.Errorf("%d did not equal expected %d", got, expected)
+	}
+}
 
 func Test_parseOffsetMap_returnsCorrectMapWhenOneKey(t *testing.T) {
 	fileContents := [48]byte{
@@ -29,9 +36,7 @@ func Test_parseOffsetMap_returnsCorrectMapWhenOneKey(t *testing.T) {
 
 	offsetMap := parseOffsetMap(bytes.NewReader(fileContents[:]))
 
-	if !reflect.DeepEqual(expectedMap, offsetMap) {
-		t.Errorf("%d did not equal expected %d", offsetMap, expectedMap)
-	}
+	shouldEqual(t, expectedMap, offsetMap)
 }
 
 func Test_parseOffsetMap_returnsCorrectMapWhenTwoKeys(t *testing.T) {
@@ -68,9 +73,7 @@ func Test_parseOffsetMap_returnsCorrectMapWhenTwoKeys(t *testing.T) {
 
 	offsetMap := parseOffsetMap(bytes.NewReader(fileContents[:]))
 
-	if !reflect.DeepEqual(expectedMap, offsetMap) {
-		t.Errorf("%d did not equal expected %d", offsetMap, expectedMap)
-	}
+	shouldEqual(t, expectedMap, offsetMap)
 }
 
 func Test_parseOffsetMap_returnsMapWithLastValueWhenDuplicateKeys(t *testing.T) {
@@ -100,9 +103,7 @@ func Test_parseOffsetMap_returnsMapWithLastValueWhenDuplicateKeys(t *testing.T) 
 
 	offsetMap := parseOffsetMap(bytes.NewReader(fileContents[:]))
 
-	if !reflect.DeepEqual(expectedMap, offsetMap) {
-		t.Errorf("%d did not equal expected %d", offsetMap, expectedMap)
-	}
+	shouldEqual(t, expectedMap, offsetMap)
 }
 
 func Test_writeData_writesAndReturnsBytesWrittenCount(t *testing.T) {
@@ -118,9 +119,7 @@ func Test_writeData_writesAndReturnsBytesWrittenCount(t *testing.T) {
 		t.Errorf("bytesWritten: %d did not equal expected %d", bytesWritten, 8)
 	}
 
-	if !reflect.DeepEqual(buffer.Bytes(), dataToWrite[:]) {
-		t.Errorf("%d %d did not equal expected %d %d", buffer.Bytes(), len(buffer.Bytes()), dataToWrite[:], len(dataToWrite[:]))
-	}
+	shouldEqual(t, buffer.Bytes(), dataToWrite[:])
 }
 
 type writerStub struct {
@@ -136,22 +135,25 @@ func Test_writeData_returnErrorWhenWriteErrors(t *testing.T) {
 	dataToWrite := [8]byte{0x07, 0x7F, 0x33, 0x77, 0xC2, 0xE9, 0xAE, 0xD3}
 	bytesWritten, err := writeData("RQ-1", &writer, dataToWrite[:])
 
-	if err.Error() != "Broken" {
-		t.Errorf("err: %s did not equal expected %s", err.Error(), "Broken")
-	}
-
-	if bytesWritten != 0 {
-		t.Errorf("bytesWritten: %d did not equal expected %d", bytesWritten, 0)
-	}
+	shouldEqual(t, err.Error(), "Broken")
+	shouldEqual(t, bytesWritten, 0)
 }
 
-type mockEngineReadFile struct {
+type mockWriteEngineFile struct {
+	io.Writer
+}
+
+func (mockWriteEngineFile) Close() error               { return nil }
+func (mockWriteEngineFile) Stat() (os.FileInfo, error) { return nil, nil }
+func (mockWriteEngineFile) ReadAt(p []byte, off int64) (n int, err error) { return 0, nil }
+
+type mockReadEngineFile struct {
 	io.ReaderAt
-	length int64
 }
 
-func (mockEngineReadFile) Close() error                { return nil }
-func (mockEngineReadFile) Write(p []byte) (int, error) { return 0, nil }
+func (mockReadEngineFile) Close() error               { return nil }
+func (mockReadEngineFile) Stat() (os.FileInfo, error) { return nil, nil }
+func (mockReadEngineFile) Write(p []byte) (n int, err error) {return 0, nil}
 
 func Test_StorageEngine_Get_returnsValueForKey(t *testing.T) {
 	dataFileContents := [48]byte{
@@ -165,8 +167,7 @@ func Test_StorageEngine_Get_returnsValueForKey(t *testing.T) {
 		0x7d, 0x47, 0x2a, 0x46, 0x2f, 0x10, 0x2f, 0x45}
 
 	storageEngine := new(StorageEngine)
-	fakeDataFile := bytes.NewReader(dataFileContents[:])
-	storageEngine.dataFile = mockEngineReadFile{fakeDataFile}
+	storageEngine.dataFile = mockReadEngineFile{bytes.NewReader(dataFileContents[:])}
 	storageEngine.offsetMap = make(map[[32]byte]dataInfo)
 	storageEngine.offsetMap[sha256Key] = dataInfo{3, 5}
 
@@ -174,13 +175,8 @@ func Test_StorageEngine_Get_returnsValueForKey(t *testing.T) {
 
 	expectedResult := [5]byte{0x04, 0x05, 0x06, 0x07, 0x08}
 
-	if !reflect.DeepEqual(result, expectedResult[:]) {
-		t.Errorf("%d did not equal expected %d", result, expectedResult[:])
-	}
-
-	if err != nil {
-		t.Errorf("Non nil value %d for err", err)
-	}
+	shouldEqual(t, result, expectedResult[:])
+	shouldEqual(t, err, nil)
 }
 
 func Test_StorageEngine_Get_returnsNilWhenKeyNotFound(t *testing.T) {
@@ -189,12 +185,13 @@ func Test_StorageEngine_Get_returnsNilWhenKeyNotFound(t *testing.T) {
 
 	result, err := storageEngine.Get("randomkey")
 
-	if result != nil {
-		t.Errorf("Non nil value %d for result", result)
-	}
+	t.Log(result == nil)
 
-	if err != nil {
-		t.Errorf("Non nil value %d for err", err)
+	if (result != nil) {
+		t.Errorf("%d did not equal expected nil", result)
+	}
+	if (err != nil) {
+		t.Errorf("%d did not equal expected nil", err)
 	}
 }
 
@@ -210,33 +207,37 @@ func Test_StorageEngine_Get_returnsErrorWhenReadFails(t *testing.T) {
 		0x7d, 0x47, 0x2a, 0x46, 0x2f, 0x10, 0x2f, 0x45}
 
 	storageEngine := new(StorageEngine)
-	fakeDataFile := bytes.NewReader(dataFileContents[:])
-	storageEngine.dataFile = mockEngineReadFile{fakeDataFile}
+	storageEngine.dataFile = mockReadEngineFile{bytes.NewReader(dataFileContents[:])}
 	storageEngine.offsetMap = make(map[[32]byte]dataInfo)
 	storageEngine.offsetMap[sha256Key] = dataInfo{3, 100}
 
 	_, err := storageEngine.Get("randomkey")
 
-	if err.Error() != "EOF" {
-		t.Errorf("Unexpected error: %s", err)
-	}
+	shouldEqual(t, err.Error(), "EOF")
 }
-
-type mockEngineWriteFile struct {
-	io.Write
-	io.ReaderAt
-	length int64
-}
-
-func (mockEngineWriteFile) Close() error { return nil }
 
 func Test_StorageEngine_processDataChannel_writesData(t *testing.T) {
-	var buffer bytes.Buffer
-	dataFile := mockEngineWriteFile{buffer, buffer, 10}
-
 	storageEngine := new(StorageEngine)
-	storageEngine.dataFile = dataFile
-	storageEngine.dataChannel = make(chan []dataToWrite)
-	storageEngine.mapChannel = make(chan []dataToMap)
+	var buf bytes.Buffer
+	storageEngine.dataFile = mockWriteEngineFile{&buf}
+	storageEngine.dataChannel = make(chan dataToWrite)
+	storageEngine.mapChannel = make(chan dataToMap)
+	storageEngine.shutdownTriggerChannel = make(chan struct{})
+	storageEngine.shutdownResponseChannel = make(chan int)
 
+	go storageEngine.processDataChannel()
+
+	key := [32]byte{
+		0x07, 0x7F, 0x33, 0x77, 0xC2, 0xE9, 0xAE, 0xD3,
+		0x2C, 0xBA, 0xE1, 0xA9, 0xCC, 0x2C, 0x65, 0xDA,
+		0x3E, 0x3D, 0xD4, 0x58, 0xCF, 0x14, 0x04, 0xE1,
+		0xFB, 0xC6, 0xCD, 0x29, 0x75, 0x95, 0x37, 0xE6}
+
+	value := [5]byte{0x01, 0x02, 0x03, 0x04, 0x05}
+
+	responseChannel := make(chan int)
+	storageEngine.dataChannel <- dataToWrite{key[:], value[:], responseChannel}
+	<- storageEngine.mapChannel
+
+	shouldEqual(t, buf.Bytes(), value[:])
 }
