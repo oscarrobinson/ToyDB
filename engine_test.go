@@ -143,17 +143,25 @@ type mockWriteEngineFile struct {
 	io.Writer
 }
 
-func (mockWriteEngineFile) Close() error               { return nil }
-func (mockWriteEngineFile) Stat() (os.FileInfo, error) { return nil, nil }
+func (mockWriteEngineFile) Close() error                                  { return nil }
+func (mockWriteEngineFile) Stat() (os.FileInfo, error)                    { return nil, nil }
 func (mockWriteEngineFile) ReadAt(p []byte, off int64) (n int, err error) { return 0, nil }
 
 type mockReadEngineFile struct {
 	io.ReaderAt
 }
 
-func (mockReadEngineFile) Close() error               { return nil }
-func (mockReadEngineFile) Stat() (os.FileInfo, error) { return nil, nil }
-func (mockReadEngineFile) Write(p []byte) (n int, err error) {return 0, nil}
+func (mockReadEngineFile) Close() error                      { return nil }
+func (mockReadEngineFile) Stat() (os.FileInfo, error)        { return nil, nil }
+func (mockReadEngineFile) Write(p []byte) (n int, err error) { return 0, nil }
+
+type mockErroredWriteEngineFile struct {}
+
+func (mockErroredWriteEngineFile) Write(p []byte) (n int, err error) 			  {return 2, errors.New("Broken")}
+func (mockErroredWriteEngineFile) Close() error                                  { return nil }
+func (mockErroredWriteEngineFile) Stat() (os.FileInfo, error)                    { return nil, nil }
+func (mockErroredWriteEngineFile) ReadAt(p []byte, off int64) (n int, err error) { return 0, nil }
+
 
 func Test_StorageEngine_Get_returnsValueForKey(t *testing.T) {
 	dataFileContents := [48]byte{
@@ -187,10 +195,10 @@ func Test_StorageEngine_Get_returnsNilWhenKeyNotFound(t *testing.T) {
 
 	t.Log(result == nil)
 
-	if (result != nil) {
+	if result != nil {
 		t.Errorf("%d did not equal expected nil", result)
 	}
-	if (err != nil) {
+	if err != nil {
 		t.Errorf("%d did not equal expected nil", err)
 	}
 }
@@ -216,7 +224,7 @@ func Test_StorageEngine_Get_returnsErrorWhenReadFails(t *testing.T) {
 	shouldEqual(t, err.Error(), "EOF")
 }
 
-func Test_StorageEngine_processDataChannel_writesData(t *testing.T) {
+func Test_StorageEngine_processDataChannel_writesDataAndSendsInfoToMapChannel(t *testing.T) {
 	storageEngine := new(StorageEngine)
 	var buf bytes.Buffer
 	storageEngine.dataFile = mockWriteEngineFile{&buf}
@@ -237,7 +245,50 @@ func Test_StorageEngine_processDataChannel_writesData(t *testing.T) {
 
 	responseChannel := make(chan int)
 	storageEngine.dataChannel <- dataToWrite{key[:], value[:], responseChannel}
-	<- storageEngine.mapChannel
+	mapData := <-storageEngine.mapChannel
 
 	shouldEqual(t, buf.Bytes(), value[:])
+	shouldEqual(t, storageEngine.dataFileLength, int64(5))
+	shouldEqual(t, mapData, dataToMap{key[:], dataInfo{0, 5}, responseChannel})
+}
+
+func Test_StorageEngine_processDataChannel_sendsToResponseChannelOnErr(t *testing.T) {
+	storageEngine := new(StorageEngine)
+	storageEngine.dataFile = mockErroredWriteEngineFile{}
+	storageEngine.dataChannel = make(chan dataToWrite)
+	storageEngine.mapChannel = make(chan dataToMap)
+	storageEngine.shutdownTriggerChannel = make(chan struct{})
+	storageEngine.shutdownResponseChannel = make(chan int)
+
+	go storageEngine.processDataChannel()
+
+	key := [32]byte{
+		0x07, 0x7F, 0x33, 0x77, 0xC2, 0xE9, 0xAE, 0xD3,
+		0x2C, 0xBA, 0xE1, 0xA9, 0xCC, 0x2C, 0x65, 0xDA,
+		0x3E, 0x3D, 0xD4, 0x58, 0xCF, 0x14, 0x04, 0xE1,
+		0xFB, 0xC6, 0xCD, 0x29, 0x75, 0x95, 0x37, 0xE6}
+
+	value := [5]byte{0x01, 0x02, 0x03, 0x04, 0x05}
+
+	responseChannel := make(chan int)
+	storageEngine.dataChannel <- dataToWrite{key[:], value[:], responseChannel}
+	res := <-responseChannel
+
+	shouldEqual(t, res, 1)
+	//Should still update length for whatever number of bytes did get written to the data file
+	shouldEqual(t, storageEngine.dataFileLength, int64(2))
+}
+
+func Test_StorageEngine_processDataChannel_shouldReturnWhenShutdownTriggerReceived(t *testing.T) {
+	storageEngine := new(StorageEngine)
+	storageEngine.dataFile = mockErroredWriteEngineFile{}
+	storageEngine.dataChannel = make(chan dataToWrite)
+	storageEngine.mapChannel = make(chan dataToMap)
+	storageEngine.shutdownTriggerChannel = make(chan struct{})
+	storageEngine.shutdownResponseChannel = make(chan int)
+
+	go storageEngine.processDataChannel()
+	storageEngine.shutdownTriggerChannel <- shutdown{}
+	shutdownRes := <-storageEngine.shutdownResponseChannel
+	shouldEqual(t, shutdownRes, dataProcessorShutDown)
 }

@@ -106,7 +106,7 @@ type StorageEngine struct {
 	shutdownResponseChannel chan int
 }
 
-func (eng StorageEngine) Get(key string) ([]byte, error) {
+func (eng *StorageEngine) Get(key string) ([]byte, error) {
 	hash := sha256.Sum256([]byte(key))
 	if keyDataInfo, ok := eng.offsetMap[hash]; ok {
 		buffer := make([]byte, keyDataInfo.length)
@@ -117,12 +117,12 @@ func (eng StorageEngine) Get(key string) ([]byte, error) {
 	}
 }
 
-func (eng StorageEngine) Shutdown() {
+func (eng *StorageEngine) Shutdown() {
 	eng.shutdownTriggerChannel <- shutdown{}
 	mapShutdown := false
 	dataShutdown := false
 	for !(mapShutdown && dataShutdown) {
-		entityShutdown := <- eng.shutdownResponseChannel
+		entityShutdown := <-eng.shutdownResponseChannel
 		if entityShutdown == dataProcessorShutDown {
 			dataShutdown = true
 		} else {
@@ -143,17 +143,18 @@ func (eng StorageEngine) Shutdown() {
 	}
 }
 
-func (eng StorageEngine) processDataChannel() {
+func (eng *StorageEngine) processDataChannel() {
 	for {
 		select {
-		case data := <- eng.dataChannel:
+		case data := <-eng.dataChannel:
 			bytesWritten, err := eng.dataFile.Write(data.value)
+			offset := eng.dataFileLength
 			eng.dataFileLength += int64(bytesWritten)
 			if err != nil {
 				log.Printf("Error writing data: %s\n", err.Error())
 				data.responseChannel <- 1
 			} else {
-				info := dataInfo{eng.dataFileLength, int64(bytesWritten)}
+				info := dataInfo{offset, int64(bytesWritten)}
 				mapData := dataToMap{data.key, info, data.responseChannel}
 				eng.mapChannel <- mapData
 			}
@@ -165,10 +166,10 @@ func (eng StorageEngine) processDataChannel() {
 	}
 }
 
-func (eng StorageEngine) processMapChannel() {
+func (eng *StorageEngine) processMapChannel() {
 	for {
 		select {
-		case mapInfo := <- eng.mapChannel:
+		case mapInfo := <-eng.mapChannel:
 			toWrite := append(mapInfo.key, mapInfo.dataInfo.toByteSlice()...)
 			bytesWritten, err := eng.dataFile.Write(toWrite)
 			eng.mapFileLength += int64(bytesWritten)
