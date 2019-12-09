@@ -3,6 +3,7 @@ package toydb
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -171,7 +172,7 @@ func (eng *StorageEngine) processMapChannel() {
 		select {
 		case mapInfo := <-eng.mapChannel:
 			toWrite := append(mapInfo.key, mapInfo.dataInfo.toByteSlice()...)
-			bytesWritten, err := eng.dataFile.Write(toWrite)
+			bytesWritten, err := eng.mapFile.Write(toWrite)
 			eng.mapFileLength += int64(bytesWritten)
 			if err != nil {
 				log.Printf("Error writing map data: %s\n", err.Error())
@@ -187,6 +188,19 @@ func (eng *StorageEngine) processMapChannel() {
 			return
 		default:
 		}
+	}
+}
+
+func (eng *StorageEngine) Set(key string, value string) error {
+	responseChannel := make(chan int)
+	hashedKey := sha256.Sum256([]byte(key))
+	writeData := dataToWrite{hashedKey[:], []byte(value), responseChannel}
+	eng.dataChannel <- writeData
+	result := <-responseChannel
+	if result == 0 {
+		return nil
+	} else {
+		return errors.New("Error performing Set")
 	}
 }
 
@@ -221,29 +235,3 @@ func OpenFile(path string) *os.File {
 	}
 	return file
 }
-
-//TODO
-// - Test processDataChannel
-// - Test processMapChannel
-// - Test Shutdown
-// = Test NewStorageEngine
-// = Test toByteSlice
-// - Implement the Set function
-// - Test Set function
-
-// func (n StorageEngine) Set(key string, value string) *error {
-// 	responseChannel := make(chan int)
-// 	writeData := dataToWrite{
-// 		key: sha256.Sum256([]byte(key)),
-// 		value: []byte(value),
-// 		responseChannel
-// 	}
-// 	n.dataChannel <- writeData
-// 	result <- responseChannel
-// 	if (result == 1) {
-// 		return nil
-// 	} else {
-// 		return x
-// 	}
-
-// }
